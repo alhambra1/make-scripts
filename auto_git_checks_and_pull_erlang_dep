@@ -1,0 +1,56 @@
+# Configure an Erlang dependency for automatic git pull
+# This relies on a custom file, make_deps.config, in the
+# parent application folder, which includes
+# the line, "git_pull_before_make: REPO_NAME",
+# which is parsed here.
+#
+# This script also checks for a mismatch between the branch
+# specified for the dep in the parent Makefile and the
+# current branch in the local copy of the dependency, checking
+# out and pulling the branch if the dep's name is included
+# in 'git_pull_before_make' in our custom file, 'make_deps.config',
+# in the parent application folder.
+#
+# Checks for outstanding git changes (unstaged and uncommitted)
+# can also be ignored (useful in closed makes, such as in a container),
+# by specifying 'ignore_outstanding_git_changes: REPO_NAME' in the
+# custom file, 'make_deps.config', in the parent application folder.
+
+THIS_REPO := $(notdir $(shell pwd))
+
+red_text_prefix =\033[0;31mMake $(1) (dep $(THIS_REPO)):
+
+ignore_prompt = printf "\nIgnore and continue make? [y/N] " && read yn && if [ "$$yn" == y ]; then printf "\033[1;37m%s\n" $(1) && exit 0; else if [ "$$yn" == n ]; then exit 1; else printf "\033[1;37m%s\nYou responded with \"$$yn\". Defaulting to \"no.\"\n\nExiting make...\n\n" && exit 1; fi; fi
+
+PARENT_DIR_PATH_TO_VALIDATE :=../../priv/
+PARENT_DIR_IS_DIR := $(shell test -d $(PARENT_DIR_PATH_TO_VALIDATE) -a ! -h $(PARENT_DIR_PATH_TO_VALIDATE) && echo true)
+CURRENT_DEP_BRANCH := $(shell git rev-parse --abbrev-ref HEAD)
+DEP_BRANCH_IN_PARENT_MAKEFILE := $(strip $(shell cat ../../Makefile | grep -oE "dep_$(THIS_REPO)\s*=\s*git\s*git@gitlab.com[^\#]+" | grep -oE "[^ ]+\s*$$"))
+
+GIT_PULL_LATEST := $(strip $(shell if [ -f ../../make_deps.config ]; then grep -E "git_pull_before_make:.+$(THIS_REPO)" ../../make_deps.config; fi))
+IGNORE_OUTSTANDING_GIT_CHANGES := $(strip $(shell if [ -f ../../make_deps.config ]; then grep -E "ignore_outstanding_git_changes:.+$(THIS_REPO)" ../../make_deps.config; fi))
+
+
+#https://stackoverflow.com/questions/3878624/how-do-i-programmatically-determine-if-there-are-uncommitted-changes
+check_for_outstanding_git_changes = echo && echo Checking for unstaged changes... && if ! git diff-files --quiet --ignore-submodules --; then printf "$(call red_text_prefix,"Warning") You have unstaged changes in dependency $(THIS_REPO). Please commit or stash them. Changes:\n\n" && git diff-files --name-status -r --ignore-submodules -- && $(call ignore_prompt,"Ignoring unstaged changes..."); else echo Done!; fi && echo && echo Checking for uncommitted changes... && if ! git diff-index --cached --quiet HEAD --ignore-submodules --; then printf "$(call red_text_prefix,"Warning") You have uncommited changes in dependency $(THIS_REPO). Please commit or stash them. Changes:\n\n" && git diff-index --cached --name-status -r --ignore-submodules HEAD -- && $(call ignore_prompt,"Ignoring uncommitted changes..."); else echo Done!; fi
+	
+check_for_branch_mismatch = echo && echo Checking if the current dep branch matches the dep\'s branch in the parent\'s Makefile... && if [ "$(DEP_BRANCH_IN_PARENT_MAKEFILE)" != "$(CURRENT_DEP_BRANCH)" ]; then if [ -z "$(GIT_PULL_LATEST)" ]; then echo "$(call red_text_prefix,"Error") The current branch, $(CURRENT_DEP_BRANCH), in dependency, $(THIS_REPO), does not match the branch, $(DEP_BRANCH_IN_PARENT_MAKEFILE), specified for the dependency in the parent's Makefile)" && $(call ignore_prompt,"Ignoring branch mismatch..."); else printf "\nbranch mismatch - checking out the branch specified for $(THIS_REPO) in the parent application's Makefile...\n\n\033[0;32mgit checkout $(DEP_BRANCH_IN_PARENT_MAKEFILE)\n" && git checkout $(DEP_BRANCH_IN_PARENT_MAKEFILE) && printf "\033[1;37m"; fi; fi
+
+maybe_git_pull_and_complete = echo && if [ -z "$(GIT_PULL_LATEST)" ]; then echo "Dependency, $(THIS_REPO), is not configured for automatic git pull (see make_deps.config in parent application directory)"; else printf "Dependency, $(THIS_REPO), is configured for automatic git pull (see make_deps.config in parent application directory):\n\n\033[0;32mgit pull\n" && git pull; fi && printf "\n\033[0;32mDone making dependency $(THIS_REPO)\n\n\033[1;37m"
+
+
+all::
+	@echo
+	@echo Validating PARENT_DIR_PATH_TO_VALIDATE...
+	@if [ -z "$(PARENT_DIR_IS_DIR)" ]; then echo "$(call red_text_prefix,"Error") Variable PARENT_DIR_PATH_TO_VALIDATE, $(PARENT_DIR_PATH_TO_VALIDATE), does not appear to point a valid directory." && exit 1; else echo Done!; fi
+	@echo
+	@echo Validating variable, DEP_BRANCH_IN_PARENT_MAKEFILE...
+	@if [ -z "$(DEP_BRANCH_IN_PARENT_MAKEFILE)" ]; then echo "$(call red_text_prefix,"Error") Variable DEP_BRANCH_IN_PARENT_MAKEFILE evaluated empty." && exit 1; else echo Done!; fi
+	@echo
+	git update-index -q --ignore-submodules --refresh
+	@if [ -z "$(IGNORE_OUTSTANDING_GIT_CHANGES)" ]; then $(call check_for_outstanding_git_changes); fi
+	@$(call check_for_branch_mismatch)
+	@$(call maybe_git_pull_and_complete)
+
+
+include $(if $(ERLANG_MK_FILENAME),$(ERLANG_MK_FILENAME),erlang.mk)
